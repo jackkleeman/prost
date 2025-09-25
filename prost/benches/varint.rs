@@ -47,8 +47,9 @@ fn benchmark_varint(criterion: &mut Criterion, name: &str, mut values: Vec<u64>)
 
                 b.iter(|| {
                     let mut buf = &mut buf.as_slice();
+                    let mut result = Ok(0);
                     while buf.has_remaining() {
-                        let result = decode_varint(&mut buf);
+                        result = decode_varint(&mut buf);
                         debug_assert!(result.is_ok());
                         criterion::black_box(&result);
                     }
@@ -74,14 +75,13 @@ fn benchmark_varint(criterion: &mut Criterion, name: &str, mut values: Vec<u64>)
 fn main() {
     let mut criterion = Criterion::default().configure_from_args();
 
-    // Benchmark encoding and decoding 100 small (1 byte) varints.
-    benchmark_varint(&mut criterion, "small", (0..100).collect());
-
-    // Benchmark encoding and decoding 100 medium (5 byte) varints.
-    benchmark_varint(&mut criterion, "medium", (1 << 28..).take(100).collect());
-
-    // Benchmark encoding and decoding 100 large (10 byte) varints.
-    benchmark_varint(&mut criterion, "large", (1 << 63..).take(100).collect());
+    for size in 1..=10 {
+        benchmark_varint(
+            &mut criterion,
+            &format!("{size} bytes"),
+            (1 << (size - 1) * 7..).take(100).collect(),
+        );
+    }
 
     // Benchmark encoding and decoding 100 varints of mixed width (average 5.5 bytes).
     benchmark_varint(
