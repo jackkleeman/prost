@@ -50,12 +50,22 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, DecodeError> {
         // let first_4 = unsafe { bytes.as_ptr().cast::<u32>().read_unaligned() };
 
         let completions_in_first_8 = !first_8 & !0x7f7f7f7f7f7f7f7f;
+
         // let completions_in_first_4 = !first_4 & !0x7f7f7f7f;
 
         // specialise on size in a single jump
 
         return Ok(if completions_in_first_8 != 0 {
-            let (value, advance) = decode_varint_8_or_less(first_8.to_ne_bytes());
+            // use 1 bytes unstead of 0x80 bytes
+            let completions_in_first_8 = (completions_in_first_8 >> 7) & 0x0101010101010101;
+            let completions_in_first_8: [u8; 8] = completions_in_first_8.to_ne_bytes();
+            let completions_in_first_8: [bool; 8] =
+                unsafe { std::mem::transmute(completions_in_first_8) };
+
+            let first_8_masked = first_8 & 0x7f7f7f7f7f7f7f7f;
+
+            let (value, advance) =
+                decode_varint_8_or_less(first_8_masked.to_ne_bytes(), completions_in_first_8);
             buf.advance(advance);
             value
         } else {
@@ -224,58 +234,46 @@ fn decode_varint_8(low: u32, high: u32) -> u64 {
         | (((high & 0x7f000000) as u64) << 25)
 }
 
-fn decode_varint_8_or_less(data: [u8; 8]) -> (u64, usize) {
+fn decode_varint_8_or_less(uncompleted: [u8; 8], completions: [bool; 8]) -> (u64, usize) {
     // Extract bytes from the u64 using shifts and masks
-    let mut part0: u32 = u32::from(data[0]);
-    if data[0] < 0x80 {
+    let mut part0: u32 = u32::from(uncompleted[0]);
+    if completions[0] {
         return (u64::from(part0), 1);
     };
-    part0 -= 0x80;
 
-    part0 += u32::from(data[1]) << 7;
-    if data[1] < 0x80 {
+    part0 += u32::from(uncompleted[1]) << 7;
+    if completions[1] {
         return (u64::from(part0), 2);
     };
-    part0 -= 0x80 << 7;
 
-    part0 += u32::from(data[2]) << 14;
-    if data[2] < 0x80 {
+    part0 += u32::from(uncompleted[2]) << 14;
+    if completions[2] {
         return (u64::from(part0), 3);
     };
-    part0 -= 0x80 << 14;
 
-    part0 += u32::from(data[3]) << 21;
-    if data[3] < 0x80 {
+    part0 += u32::from(uncompleted[3]) << 21;
+    if completions[3] {
         return (u64::from(part0), 4);
     };
-    part0 -= 0x80 << 21;
     let value = u64::from(part0);
 
-    let mut part1: u32 = u32::from(data[4]);
-    if data[4] < 0x80 {
+    let mut part1: u32 = u32::from(uncompleted[4]);
+    if completions[4] {
         return (value + (u64::from(part1) << 28), 5);
     };
-    part1 -= 0x80;
 
-    part1 += u32::from(data[5]) << 7;
-    if data[5] < 0x80 {
+    part1 += u32::from(uncompleted[5]) << 7;
+    if completions[5] {
         return (value + (u64::from(part1) << 28), 6);
     };
-    part1 -= 0x80 << 7;
 
-    part1 += u32::from(data[6]) << 14;
-    if data[6] < 0x80 {
+    part1 += u32::from(uncompleted[6]) << 14;
+    if completions[6] {
         return (value + (u64::from(part1) << 28), 7);
     };
-    part1 -= 0x80 << 14;
 
-    part1 += u32::from(data[7]) << 21;
-    if data[7] < 0x80 {
-        return (value + (u64::from(part1) << 28), 8);
-    };
-
-    // If we get here, no completion bit was found in the u64
-    (0, 0)
+    part1 += u32::from(uncompleted[7]) << 21;
+    return (value + (u64::from(part1) << 28), 8);
 }
 
 #[inline(always)]
