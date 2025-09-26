@@ -1,5 +1,4 @@
-use core::num::NonZeroU64;
-use core::{cmp::min, hint::unreachable_unchecked};
+use core::{cmp::min, num::NonZeroU64};
 
 use ::bytes::{Buf, BufMut};
 
@@ -48,68 +47,40 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, DecodeError> {
         Ok(u64::from(byte))
     } else if len >= 10 || (len >= 8 && bytes[len - 1] < 0x80) {
         let first_8 = unsafe { bytes.as_ptr().cast::<u64>().read_unaligned() };
-        let first_4 = unsafe { bytes.as_ptr().cast::<u32>().read_unaligned() };
-        let second_4 = unsafe { bytes.as_ptr().cast::<u32>().add(1).read_unaligned() };
+        // let first_4 = unsafe { bytes.as_ptr().cast::<u32>().read_unaligned() };
 
         let completions_in_first_8 = !first_8 & !0x7f7f7f7f7f7f7f7f;
         // let completions_in_first_4 = !first_4 & !0x7f7f7f7f;
-        // let completions_in_second_4 = !second_4 & !0x7f7f7f7f;
 
         // specialise on size in a single jump
-        let size = completions_in_first_8.trailing_zeros() / 8 + 1;
 
-        return Ok(match size {
-            2 => {
-                buf.advance(2);
-                decode_varint_2(first_4)
-            }
-            3 => {
-                buf.advance(3);
-                decode_varint_3(first_4)
-            }
-            4 => {
-                buf.advance(4);
-                decode_varint_4(first_4)
-            }
-            5 => {
-                buf.advance(5);
-                decode_varint_5(first_4, second_4)
-            }
-            6 => {
-                buf.advance(6);
-                decode_varint_6(first_4, second_4)
-            }
-            7 => {
-                buf.advance(7);
-                decode_varint_7(first_4, second_4)
-            }
-            8 => {
-                buf.advance(8);
-                decode_varint_8(first_4, second_4)
-            }
-            9 => {
-                // 9 or 10 byte case
+        return Ok(if completions_in_first_8 != 0 {
+            let (value, advance) = decode_varint_8_or_less(first_8.to_ne_bytes());
+            buf.advance(advance);
+            value
+        } else {
+            let first_4 = unsafe { bytes.as_ptr().cast::<u32>().read_unaligned() };
+            let second_4 = unsafe { bytes.as_ptr().cast::<u32>().add(1).read_unaligned() };
 
-                // SAFETY: if len is 8, then bytes[7] was a completion and we would not take this branch
-                let byte_9 = unsafe { *bytes.get_unchecked(8) };
-                if byte_9 < 0x80 {
-                    buf.advance(9);
-                    decode_varint_9(first_4, second_4, byte_9)
-                } else {
-                    // SAFETY: if len is 9, then byte_9 was a completion and we would not take this branch
-                    let byte_10 = unsafe { *bytes.get_unchecked(9) };
+            // 9 or 10 byte case
 
-                    if byte_10 > 0b00000001 {
-                        // tenth byte cannot be a continuation, and if its over 1 then its a u64 overflow
-                        return Err(DecodeError::new("invalid varint"));
-                    }
+            // SAFETY: if len is 8, then bytes[7] was a completion and we would not take this branch
+            let byte_9 = unsafe { *bytes.get_unchecked(8) };
+            if byte_9 < 0x80 {
+                buf.advance(9);
+                decode_varint_9(first_4, second_4, byte_9)
+            } else {
+                // SAFETY: if len is 9, then byte_9 was a completion and we would not take this branch
+                let byte_10 = unsafe { *bytes.get_unchecked(9) };
 
-                    buf.advance(10);
-                    decode_varint_10(first_4, second_4, byte_9, byte_10)
+                if byte_10 > 0b00000001 {
+                    // tenth byte cannot be a continuation, and if its over 1 then its a u64 overflow
+                    return Err(DecodeError::new("invalid varint"));
                 }
+
+                buf.advance(10);
+                decode_varint_10(first_4, second_4, byte_9, byte_10)
             }
-            // SAFETY; we have handled the 1 byte case, and a size of more than 9 is impossible
-            _ => unsafe { unreachable_unchecked() },
         });
     } else if bytes[len - 1] < 0x80 {
         // len less than 8, terminating with a completion
@@ -251,6 +222,60 @@ fn decode_varint_8(low: u32, high: u32) -> u64 {
         | (((high & 0x00007f00) as u64) << 27)
         | (((high & 0x007f0000) as u64) << 26)
         | (((high & 0x7f000000) as u64) << 25)
+}
+
+fn decode_varint_8_or_less(data: [u8; 8]) -> (u64, usize) {
+    // Extract bytes from the u64 using shifts and masks
+    let mut part0: u32 = u32::from(data[0]);
+    if data[0] < 0x80 {
+        return (u64::from(part0), 1);
+    };
+    part0 -= 0x80;
+
+    part0 += u32::from(data[1]) << 7;
+    if data[1] < 0x80 {
+        return (u64::from(part0), 2);
+    };
+    part0 -= 0x80 << 7;
+
+    part0 += u32::from(data[2]) << 14;
+    if data[2] < 0x80 {
+        return (u64::from(part0), 3);
+    };
+    part0 -= 0x80 << 14;
+
+    part0 += u32::from(data[3]) << 21;
+    if data[3] < 0x80 {
+        return (u64::from(part0), 4);
+    };
+    part0 -= 0x80 << 21;
+    let value = u64::from(part0);
+
+    let mut part1: u32 = u32::from(data[4]);
+    if data[4] < 0x80 {
+        return (value + (u64::from(part1) << 28), 5);
+    };
+    part1 -= 0x80;
+
+    part1 += u32::from(data[5]) << 7;
+    if data[5] < 0x80 {
+        return (value + (u64::from(part1) << 28), 6);
+    };
+    part1 -= 0x80 << 7;
+
+    part1 += u32::from(data[6]) << 14;
+    if data[6] < 0x80 {
+        return (value + (u64::from(part1) << 28), 7);
+    };
+    part1 -= 0x80 << 14;
+
+    part1 += u32::from(data[7]) << 21;
+    if data[7] < 0x80 {
+        return (value + (u64::from(part1) << 28), 8);
+    };
+
+    // If we get here, no completion bit was found in the u64
+    (0, 0)
 }
 
 #[inline(always)]
