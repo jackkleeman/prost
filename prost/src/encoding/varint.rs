@@ -47,85 +47,70 @@ pub fn decode_varint(buf: &mut impl Buf) -> Result<u64, DecodeError> {
         buf.advance(1);
         Ok(u64::from(byte))
     } else if len >= 10 || (len >= 8 && bytes[len - 1] < 0x80) {
+        let first_8 = unsafe { bytes.as_ptr().cast::<u64>().read_unaligned() };
         let first_4 = unsafe { bytes.as_ptr().cast::<u32>().read_unaligned() };
-        let completions_in_first_4 = !first_4 & !0x7f7f7f7f;
-
-        if completions_in_first_4 != 0 {
-            let size = (completions_in_first_4.trailing_zeros() + 1) / 8;
-
-            return Ok(match size {
-                2 => {
-                    buf.advance(2);
-                    decode_varint_2(first_4) as u64
-                }
-                3 => {
-                    buf.advance(3);
-                    decode_varint_3(first_4) as u64
-                }
-                4 => {
-                    buf.advance(4);
-                    decode_varint_4(first_4) as u64
-                }
-                // SAFETY; we have handled the 1 byte case, and a size of more than 4 is impossible
-                _ => unsafe { unreachable_unchecked() },
-            });
-        }
-
         let second_4 = unsafe { bytes.as_ptr().cast::<u32>().add(1).read_unaligned() };
 
-        let completions_in_second_4 = !second_4 & !0x7f7f7f7f;
+        let completions_in_first_8 = !first_8 & !0x7f7f7f7f7f7f7f7f;
+        // let completions_in_first_4 = !first_4 & !0x7f7f7f7f;
+        // let completions_in_second_4 = !second_4 & !0x7f7f7f7f;
 
-        if completions_in_second_4 != 0 {
-            // at least one completion in the second 4 bytes: find the size of the varint
-            let size = ((completions_in_second_4.trailing_zeros() + 1) / 8) + 4;
+        // specialise on size in a single jump
+        let size = completions_in_first_8.trailing_zeros() / 8 + 1;
 
-            return Ok(match size {
-                5 => {
-                    buf.advance(5);
-                    decode_varint_5(first_4, second_4)
-                }
-                6 => {
-                    buf.advance(6);
-                    decode_varint_6(first_4, second_4)
-                }
-                7 => {
-                    buf.advance(7);
-                    decode_varint_7(first_4, second_4)
-                }
-                8 => {
-                    buf.advance(8);
-                    decode_varint_8(first_4, second_4)
-                }
-                // SAFETY; we have handled the cases <= 4, and a size of more than 8 is impossible
-                _ => unsafe { unreachable_unchecked() },
-            });
-        }
-
-        // no completions in the first 8 bytes; this is either a 9 or 10 bytes varint (57-64 bits)
-
-        // SAFETY: we know that if len is 8, then bytes[7] was a completion, so completions_in_second_4 != 0
-        let byte_9 = unsafe { *bytes.get_unchecked(8) };
-
-        if byte_9 < 0x80 {
-            // 9 byte varint (57-63 bits)
-            let value = decode_varint_9(first_4, second_4, byte_9);
-            buf.advance(9);
-            return Ok(value);
-        } else {
-            // 10 byte varint (64 bits)
-
-            // SAFETY: if len is 9, then byte_9 was a completion and we would not take this branch
-            let byte_10 = unsafe { *bytes.get_unchecked(9) };
-
-            if byte_10 > 0b00000001 {
-                // tenth byte cannot be a continuation, and if its over 1 then its a u64 overflow
-                return Err(DecodeError::new("invalid varint"));
+        return Ok(match size {
+            2 => {
+                buf.advance(2);
+                decode_varint_2(first_4)
             }
+            3 => {
+                buf.advance(3);
+                decode_varint_3(first_4)
+            }
+            4 => {
+                buf.advance(4);
+                decode_varint_4(first_4)
+            }
+            5 => {
+                buf.advance(5);
+                decode_varint_5(first_4, second_4)
+            }
+            6 => {
+                buf.advance(6);
+                decode_varint_6(first_4, second_4)
+            }
+            7 => {
+                buf.advance(7);
+                decode_varint_7(first_4, second_4)
+            }
+            8 => {
+                buf.advance(8);
+                decode_varint_8(first_4, second_4)
+            }
+            9 => {
+                // 9 or 10 byte case
 
-            let value = decode_varint_10(first_4, second_4, byte_9, byte_10);
-            buf.advance(10);
-            return Ok(value);
-        }
+                // SAFETY: if len is 8, then bytes[7] was a completion and we would not take this branch
+                let byte_9 = unsafe { *bytes.get_unchecked(8) };
+                if byte_9 < 0x80 {
+                    buf.advance(9);
+                    decode_varint_9(first_4, second_4, byte_9)
+                } else {
+                    // SAFETY: if len is 9, then byte_9 was a completion and we would not take this branch
+                    let byte_10 = unsafe { *bytes.get_unchecked(9) };
+
+                    if byte_10 > 0b00000001 {
+                        // tenth byte cannot be a continuation, and if its over 1 then its a u64 overflow
+                        return Err(DecodeError::new("invalid varint"));
+                    }
+
+                    buf.advance(10);
+                    decode_varint_10(first_4, second_4, byte_9, byte_10)
+                }
+            }
+            // SAFETY; we have handled the 1 byte case, and a size of more than 9 is impossible
+            _ => unsafe { unreachable_unchecked() },
+        });
     } else if bytes[len - 1] < 0x80 {
         // len less than 8, terminating with a completion
         let (value, advance) = decode_varint_slice(bytes)?;
@@ -229,7 +214,7 @@ fn decode_varint_slice(bytes: &[u8]) -> Result<(u64, usize), DecodeError> {
     Err(DecodeError::new("invalid varint"))
 }
 
-#[inline]
+#[inline(always)]
 fn decode_varint_10(low: u32, high: u32, byte_9: u8, byte_10: u8) -> u64 {
     ((low & 0x0000007f) as u64)
         | (((low & 0x00007f00) >> 1) as u64)
@@ -243,7 +228,7 @@ fn decode_varint_10(low: u32, high: u32, byte_9: u8, byte_10: u8) -> u64 {
         | (((byte_10 & 0x01) as u64) << 63)
 }
 
-#[inline]
+#[inline(always)]
 fn decode_varint_9(low: u32, high: u32, byte_9: u8) -> u64 {
     ((low & 0x0000007f) as u64)
         | (((low & 0x00007f00) >> 1) as u64)
@@ -256,7 +241,7 @@ fn decode_varint_9(low: u32, high: u32, byte_9: u8) -> u64 {
         | (((byte_9 & 0x7f) as u64) << 56)
 }
 
-#[inline]
+#[inline(always)]
 fn decode_varint_8(low: u32, high: u32) -> u64 {
     ((low & 0x0000007f) as u64)
         | (((low & 0x00007f00) >> 1) as u64)
@@ -268,7 +253,7 @@ fn decode_varint_8(low: u32, high: u32) -> u64 {
         | (((high & 0x7f000000) as u64) << 25)
 }
 
-#[inline]
+#[inline(always)]
 fn decode_varint_7(low: u32, high: u32) -> u64 {
     ((low & 0x0000007f) as u64)
         | (((low & 0x00007f00) >> 1) as u64)
@@ -279,7 +264,7 @@ fn decode_varint_7(low: u32, high: u32) -> u64 {
         | (((high & 0x007f0000) as u64) << 26)
 }
 
-#[inline]
+#[inline(always)]
 fn decode_varint_6(low: u32, high: u32) -> u64 {
     ((low & 0x0000007f) as u64)
         | (((low & 0x00007f00) >> 1) as u64)
@@ -289,7 +274,7 @@ fn decode_varint_6(low: u32, high: u32) -> u64 {
         | (((high & 0x00007f00) as u64) << 27)
 }
 
-#[inline]
+#[inline(always)]
 fn decode_varint_5(low: u32, high: u32) -> u64 {
     ((low & 0x0000007f) as u64)
         | (((low & 0x00007f00) >> 1) as u64)
@@ -298,18 +283,18 @@ fn decode_varint_5(low: u32, high: u32) -> u64 {
         | (((high & 0x0000007f) as u64) << 28)
 }
 
-#[inline]
+#[inline(always)]
 fn decode_varint_4(x: u32) -> u64 {
     ((x & 0x0000007f) | ((x & 0x7f000000) >> 3) | ((x & 0x007f0000) >> 2) | ((x & 0x00007f00) >> 1))
         as u64
 }
 
-#[inline]
+#[inline(always)]
 fn decode_varint_3(x: u32) -> u64 {
     ((x & 0x0000007f) | ((x & 0x007f0000) >> 2) | ((x & 0x00007f00) >> 1)) as u64
 }
 
-#[inline]
+#[inline(always)]
 fn decode_varint_2(x: u32) -> u64 {
     ((x & 0x0000007f) | ((x & 0x00007f00) >> 1)) as u64
 }
